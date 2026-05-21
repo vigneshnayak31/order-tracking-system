@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Order Tracking — Order Tracking System</title>
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .track-wrap { display: grid; grid-template-columns: 1fr 340px; gap: 1.5rem; }
+    @media(max-width:768px){ .track-wrap { grid-template-columns:1fr; } }
+    .delivered-banner {
+      background: linear-gradient(135deg,#065F46,#059669);
+      color:#fff; border-radius:var(--r-lg); padding:1.5rem; text-align:center; margin-bottom:1.5rem;
+      animation: delivered-in .5s ease;
+    }
+    @keyframes delivered-in { from{opacity:0;transform:scale(.97)} to{opacity:1;transform:none} }
+    .delivered-banner h2 { color:#fff; margin:.5rem 0 .25rem; }
+    .migration-badge {
+      display:inline-flex; align-items:center; gap:.4rem;
+      background:rgba(255,255,255,.2); padding:.3rem .8rem; border-radius:99px; font-size:.8rem; margin-top:.5rem;
+    }
+    .auto-progress-wrap {
+      background: linear-gradient(135deg, #EFF6FF, #DBEAFE);
+      border: 1px solid #BFDBFE;
+      border-radius: var(--r-lg);
+      padding: .9rem 1.2rem;
+      margin-bottom: 1.25rem;
+    }
+    .auto-progress-wrap.delivered-progress {
+      background: linear-gradient(135deg, #ECFDF5, #D1FAE5);
+      border-color: #6EE7B7;
+      color: #065F46;
+      font-weight: 600;
+      font-size: .88rem;
+    }
+    .auto-progress-label {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: .84rem; color: #1E40AF; margin-bottom: .5rem;
+    }
+    .auto-progress-label strong { color: #1E3A8A; }
+    .countdown-secs {
+      background: #1D4ED8; color: #fff;
+      border-radius: 99px; padding: .15rem .55rem;
+      font-size: .78rem; font-weight: 700; font-variant-numeric: tabular-nums;
+      min-width: 36px; text-align: center;
+    }
+    .auto-progress-track {
+      background: #BFDBFE; border-radius: 99px; height: 8px; overflow: hidden; margin-bottom: .4rem;
+    }
+    .auto-progress-bar {
+      height: 100%; background: linear-gradient(90deg, #2563EB, #60A5FA);
+      border-radius: 99px; transition: width .9s linear;
+    }
+    .auto-progress-hint { font-size: .75rem; color: #3B82F6; }
+    .auto-progress-hint strong { color: #1E40AF; }
+    .advance-btns { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:1rem; }
+  </style>
+</head>
+<body>
+<div id="navMount"></div>
+<div class="page-wrap" id="pageContent">
+  <div class="page-loader"><div class="spinner"></div> Loading order from Redis/MongoDB…</div>
+</div>
+<div class="toast-container"></div>
+
+<script src="js/app.js"></script>
+<script>
+  if (!requireAuth()) {}
+  var params  = new URLSearchParams(location.search);
+  var orderId = params.get('id');
+
+  document.getElementById('navMount').innerHTML = renderNavbar('orders');
+
+  var STATUS_STEPS = [
+    { key:'placed',            icon:'📋', label:'Order Placed',       sub:'Your order has been received' },
+    { key:'accepted',          icon:'✅', label:'Order Accepted',      sub:'Restaurant confirmed your order' },
+    { key:'preparing',         icon:'👨‍🍳', label:'Preparing',           sub:'Chef is preparing your food' },
+    { key:'out_for_delivery',  icon:'🛵', label:'Out for Delivery',    sub:'Rider is on the way to you' },
+    { key:'delivered',         icon:'🎉', label:'Delivered!',          sub:'Enjoy your meal!' }
+  ];
+
+  var STAGE_LABELS = {
+    placed:           'Waiting for restaurant to accept…',
+    accepted:         'Restaurant confirming your order…',
+    preparing:        'Chef is cooking your food…',
+    out_for_delivery: 'Rider is heading your way…'
+  };
+
+  var order = null, lifecycle = null, pollTimer = null, countdownId = null, lastStatus = null;
+
+  async function loadOrder() {
+    if (!orderId) { window.location.href = 'orders.html'; return; }
+    try {
+      var results = await Promise.all([
+        apiGet('/order/' + orderId + '/status'),
+        apiGet('/order/' + orderId + '/lifecycle').catch(function(){ return null; })
+      ]);
+      var newOrder = results[0], newLifecycle = results[1];
+
+      var statusChanged = lastStatus !== null && newOrder.status !== lastStatus;
+      order = newOrder; lifecycle = newLifecycle;
+
+      if (statusChanged) {
+        showToast('🔄 Status updated → ' + newOrder.status.replace(/_/g,' '), 'info', 3000);
+        if (newOrder.status === 'delivered')
+          showToast('✅ Delivered! Auto-migrated Redis → MongoDB', 'success', 5000);
+      }
+      lastStatus = newOrder.status;
+      renderTracker();
+      if (order.status !== 'delivered' && order.status !== 'cancelled')
+        pollTimer = setTimeout(loadOrder, 4000);
+    } catch(err) {
+      document.getElementById('pageContent').innerHTML =
+        '<div class="empty-state"><div class="empty-icon">😕</div><h3>Order not found</h3>' +
+        '<p>' + err.message + '</p><a href="orders.html" class="btn btn-primary mt-2">My Orders</a></div>';
+    }
+  }
+
+  function renderTracker() {
+    var el = document.getElementById('pageContent');
+    var currentIdx  = STATUS_STEPS.findIndex(function(s){ return s.key === order.status; });
+    var isDelivered = order.status === 'delivered';
+    var source      = order.source || 'mongodb';
+
+    // Countdown bar
+    var countdownHtml = '';
+    if (!isDelivered && lifecycle && lifecycle.auto_advance && lifecycle.remaining_ms > 0) {
+      var secsLeft = Math.ceil(lifecycle.remaining_ms / 1000);
+      var pct      = lifecycle.pct_complete;
+      var nextLbl  = (lifecycle.next_status || '').replace(/_/g,' ');
+      countdownHtml =
+        '<div class="auto-progress-wrap" id="autoProgressWrap">' +
+          '<div class="auto-progress-label">' +
+            '<span>⚡ Auto-advancing: <strong>' + (STAGE_LABELS[order.status]||'') + '</strong></span>' +
+            '<span id="countdownSecs" class="countdown-secs">' + secsLeft + 's</span>' +
+          '</div>' +
+          '<div class="auto-progress-track"><div class="auto-progress-bar" id="autoProgressBar" style="width:' + pct + '%"></div></div>' +
+          '<div class="auto-progress-hint">Next stage: <strong>' + nextLbl + '</strong></div>' +
+        '</div>';
+    } else if (isDelivered) {
+      countdownHtml = '<div class="auto-progress-wrap delivered-progress">✅ All stages complete — order delivered automatically</div>';
+    }
+
+    // Timeline
+    var timelineHtml = STATUS_STEPS.map(function(step, idx) {
+      var done = idx < currentIdx, current = idx === currentIdx;
+      var ts   = (order.timestamps && order.timestamps[step.key]) || order[step.key + '_at'];
+      return '<div class="tl-step ' + (done?'done ':'') + (current?'current':'') + '">' +
+        '<div class="tl-icon">' + (done ? '✓' : step.icon) + '</div>' +
+        '<div><div class="tl-label">' + step.label + '</div>' +
+        '<div class="tl-sub">' + step.sub + '</div>' +
+        (ts ? '<div class="tl-time">' + formatDate(ts) + '</div>' : '') +
+        '</div></div>';
+    }).join('');
+
+    // Demo buttons
+    var demoHtml = '';
+    if (!isDelivered) {
+      var btns = STATUS_STEPS.filter(function(s){ return s.key !== 'placed'; }).map(function(s) {
+        var si = STATUS_STEPS.findIndex(function(x){ return x.key === s.key; });
+        var dis = (order.status === s.key || si <= currentIdx) ? 'disabled' : '';
+        return '<button class="btn btn-sm btn-outline" onclick="advanceStatus(\'' + s.key + '\')" ' + dis + '>' + s.icon + ' ' + s.label + '</button>';
+      }).join('');
+      demoHtml = '<div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--gray-100)">' +
+        '<div class="text-xs text-muted mb-1">🎮 Demo Controls — Manually force a stage:</div>' +
+        '<div class="advance-btns">' + btns + '</div></div>';
+    }
+
+    // Order items
+    var itemsHtml = (order.items||[]).map(function(i){
+      return '<div class="summary-row"><span>' + i.name + ' × ' + i.qty + '</span><span>₹' + (i.price*i.qty) + '</span></div>';
+    }).join('') || '<p class="text-muted text-sm">Details in MongoDB</p>';
+
+    // Lifecycle sidebar card
+    var lifecycleCard = '';
+    if (lifecycle) {
+      var nxt = lifecycle.next_status ? '<div class="summary-row"><span>Next stage</span><span>' + lifecycle.next_status.replace(/_/g,' ') + '</span></div>' : '';
+      var ctr = lifecycle.remaining_ms > 0 ? '<div class="summary-row"><span>Advances in</span><span id="sidebarCountdown">' + Math.ceil(lifecycle.remaining_ms/1000) + 's</span></div>' : '';
+      var col = lifecycle.auto_advance ? 'var(--green)' : 'var(--gray-400)';
+      var lbl = lifecycle.auto_advance ? '● Active' : '— Done';
+      lifecycleCard =
+        '<div class="card mt-2"><div class="card-header">⚙️ Auto Lifecycle</div>' +
+        '<div style="padding:.75rem 1rem;font-size:.82rem;color:var(--gray-600)">' +
+        '<div class="summary-row"><span>Current stage</span><span style="font-weight:600;color:var(--blue-600)">' + order.status.replace(/_/g,' ') + '</span></div>' +
+        nxt + ctr +
+        '<div class="summary-row"><span>Auto-advance</span><span style="color:' + col + '">' + lbl + '</span></div>' +
+        '</div></div>';
+    }
+
+    el.innerHTML =
+      (isDelivered ?
+        '<div class="delivered-banner"><div style="font-size:3rem">🎉</div><h2>Order Delivered!</h2>' +
+        '<p style="opacity:.85">Your food has been delivered. Enjoy your meal!</p>' +
+        '<div class="migration-badge">⚡ Auto-migrated from Redis → MongoDB</div></div>' : '') +
+
+      '<div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1.5rem">' +
+        '<a href="orders.html" class="btn btn-ghost btn-sm">← My Orders</a>' +
+        '<span class="redis-tag">' + (source==='redis'?'⚡ Live from Redis':'🗄️ From MongoDB') + '</span>' +
+        statusPill(order.status) + '</div>' +
+
+      countdownHtml +
+
+      '<div class="track-wrap"><div><div class="tracking-card">' +
+        '<div class="tracking-header"><div>' +
+          '<div class="tracking-id">' + (order.order_id||orderId) + '</div>' +
+          '<div style="font-size:1.15rem;font-weight:700;margin:.25rem 0">' + (order.restaurant_name||'—') + '</div>' +
+          '<div class="tracking-status-badge">' + order.status.replace(/_/g,' ') + '</div>' +
+        '</div>' + (!isDelivered ? '<div class="eta-badge">⏱ ~' + (order.eta||35) + ' min ETA</div>' : '') + '</div>' +
+        '<div class="timeline">' + timelineHtml + '</div>' + demoHtml +
+      '</div></div>' +
+
+      '<div><div class="card mb-2"><div class="card-header">📋 Order Details</div>' +
+        '<div style="padding:.75rem 1rem">' + itemsHtml +
+          '<div class="summary-row" style="border-top:1px solid var(--gray-200);margin-top:.5rem;padding-top:.5rem"><span>Delivery Fee</span><span>₹' + (order.delivery_fee||0) + '</span></div>' +
+          '<div class="summary-row total"><span>Total</span><span>₹' + (order.total||0) + '</span></div>' +
+        '</div></div>' +
+      '<div class="card"><div class="card-header">🔴 Redis Debug</div>' +
+        '<div style="padding:.75rem 1rem"><div class="redis-log">' +
+          '<span class="cmd">HGET order:' + orderId + '</span>\n' +
+          '<span class="ok">status = ' + order.status + '</span>\n' +
+          '<span class="ok">source = ' + source + '</span>\n' +
+          '<span class="ok">eta    = ' + (order.eta||35) + 'min</span>\n' +
+          '<span class="ok">total  = ₹' + (order.total||0) + '</span>\n' +
+          (isDelivered ? '<span class="info">// Key deleted — migrated to MongoDB</span>' : '<span class="info">// Key active in Redis</span>') +
+        '</div></div></div>' +
+      lifecycleCard + '</div></div>';
+
+    startCountdownTicker();
+  }
+
+  function startCountdownTicker() {
+    if (countdownId) clearInterval(countdownId);
+    if (!lifecycle || !lifecycle.auto_advance || lifecycle.remaining_ms <= 0) return;
+    var remaining = lifecycle.remaining_ms;
+    var total     = lifecycle.stage_duration || remaining;
+    countdownId = setInterval(function() {
+      remaining -= 1000;
+      if (remaining < 0) { clearInterval(countdownId); return; }
+      var secsLeft = Math.ceil(remaining / 1000);
+      var pct      = Math.min(100, Math.round(((total - remaining) / total) * 100));
+      var s = document.getElementById('countdownSecs');
+      var b = document.getElementById('autoProgressBar');
+      var d = document.getElementById('sidebarCountdown');
+      if (s) s.textContent = secsLeft + 's';
+      if (b) b.style.width  = pct + '%';
+      if (d) d.textContent = secsLeft + 's';
+    }, 1000);
+  }
+
+  async function advanceStatus(newStatus) {
+    try {
+      if (pollTimer) clearTimeout(pollTimer);
+      if (countdownId) clearInterval(countdownId);
+      var data = await apiPatch('/order/' + orderId + '/status', { status: newStatus });
+      order = Object.assign({}, data.order, { source: newStatus === 'delivered' ? 'mongodb' : 'redis' });
+      lifecycle = null; lastStatus = newStatus;
+      renderTracker();
+      showToast('Status → ' + newStatus.replace(/_/g,' '), 'success');
+      if (data.migration) showToast('✅ Order migrated: Redis → MongoDB', 'info', 4000);
+      setTimeout(loadOrder, 1200);
+    } catch(err) { showToast(err.message, 'error'); }
+  }
+
+  loadOrder();
+</script>
+</body>
+</html>

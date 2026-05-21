@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Menu — Order Tracking System</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="navMount"></div>
+
+<div class="page-wrap" id="menuContent">
+  <div class="page-loader"><div class="spinner"></div> Loading menu from MongoDB…</div>
+</div>
+
+<!-- Cart conflict modal -->
+<div class="modal-overlay" id="conflictModal">
+  <div class="modal">
+    <h3>⚠️ Different Restaurant</h3>
+    <p>Your cart has items from another restaurant. Clear cart and start fresh?</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeConflictModal()">Keep Cart</button>
+      <button class="btn btn-danger" onclick="clearAndAdd()">Clear & Add</button>
+    </div>
+  </div>
+</div>
+
+<button class="cart-float hidden" id="cartFloat" onclick="window.location.href='cart.html'">
+  <span id="cartFloatCount">0 items</span>
+  <span>·</span>
+  <span id="cartFloatTotal">₹0</span>
+  <span>→ View Cart</span>
+</button>
+
+<div class="toast-container"></div>
+<script src="js/app.js"></script>
+<script>
+  let restaurant = null;
+  let pendingItem = null;
+  const params = new URLSearchParams(location.search);
+  const rid    = params.get('id');
+
+  document.getElementById('navMount').innerHTML = renderNavbar('');
+
+  async function loadMenu() {
+    if (!rid) { window.location.href = 'restaurants.html'; return; }
+    try {
+      restaurant = await apiGet(`/restaurant/${rid}/menu`);
+      renderMenu();
+      updateCartFloat();
+    } catch (err) {
+      document.getElementById('menuContent').innerHTML = `<div class="empty-state"><div class="empty-icon">😕</div><h3>Failed to load menu</h3><p>${err.message}</p></div>`;
+    }
+  }
+
+  function renderMenu() {
+    const veg  = restaurant.menu.filter(i => i.type === 'veg');
+    const nv   = restaurant.menu.filter(i => i.type === 'non_veg');
+    const bev  = restaurant.menu.filter(i => i.type === 'beverage');
+
+    document.getElementById('menuContent').innerHTML = `
+      <div class="flex items-center gap-1 mb-2">
+        <a href="restaurants.html" class="btn btn-ghost btn-sm">← Back</a>
+      </div>
+
+      <div class="menu-header">
+        <img class="menu-header-img" src="${restaurant.image}" alt="${restaurant.name}">
+        <div class="menu-header-info">
+          <h2>${restaurant.name}</h2>
+          <div class="rest-meta">${restaurant.cuisine || 'Restaurant'} · ${renderStars(restaurant.avg_rating || 4)} ${(restaurant.avg_rating||4).toFixed(1)}</div>
+          <div class="rest-meta">
+            <span>⏱ ${restaurant.avg_delivery_time} min</span>
+            <span>· ₹${restaurant.delivery_fee} delivery</span>
+            <span>· Min ₹${restaurant.min_order}</span>
+            <span class="${restaurant.is_open ? 'rest-badge open' : 'rest-badge closed'}" style="position:static;display:inline-flex;padding:.2rem .6rem">${restaurant.is_open ? '● Open' : '✕ Closed'}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="type-tabs">
+        <button class="type-tab active" onclick="scrollSection('veg',this)">🟢 Veg (${veg.length})</button>
+        <button class="type-tab" onclick="scrollSection('nonveg',this)">🔴 Non-Veg (${nv.length})</button>
+        <button class="type-tab" onclick="scrollSection('bev',this)">🥤 Beverages (${bev.length})</button>
+      </div>
+
+      ${veg.length  ? `<div id="sec-veg"   class="menu-section"><h3>🟢 Vegetarian</h3>${veg.map(menuItemHtml).join('')}</div>`  : ''}
+      ${nv.length   ? `<div id="sec-nonveg" class="menu-section"><h3>🔴 Non-Vegetarian</h3>${nv.map(menuItemHtml).join('')}</div>` : ''}
+      ${bev.length  ? `<div id="sec-bev"   class="menu-section"><h3>🥤 Beverages</h3>${bev.map(menuItemHtml).join('')}</div>`  : ''}
+    `;
+  }
+
+  function menuItemHtml(item) {
+    const qty   = (App.cart.find(c => c._id === item._id) || {}).qty || 0;
+    const inCart = qty > 0;
+    return `
+      <div class="menu-item" id="mi-${item._id}">
+        <img class="menu-item-img" src="${item.image || ''}" alt="${item.name}" loading="lazy" onerror="this.src='https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=200'">
+        <div class="menu-item-info">
+          <div class="flex items-center gap-1" style="margin-bottom:.25rem">
+            ${typeBadge(item)}
+            ${item.popular ? `<span class="badge badge-popular">🔥 Popular</span>` : ''}
+          </div>
+          <div class="menu-item-name">${item.name}</div>
+          <div class="menu-item-desc">${item.desc || ''}</div>
+          <div class="flex items-center gap-1 mt-1">
+            ${renderStars(item.rating)}
+            <span class="text-xs text-muted">${item.rating}</span>
+          </div>
+        </div>
+        <div class="menu-item-actions">
+          <div class="menu-item-price">₹${item.price}</div>
+          ${inCart ? `
+            <div class="qty-ctrl">
+              <button onclick="changeQty('${item._id}', -1)">−</button>
+              <span id="qty-${item._id}">${qty}</span>
+              <button onclick="changeQty('${item._id}', 1)">+</button>
+            </div>
+          ` : `
+            <button class="btn btn-outline btn-sm" onclick="addItem('${item._id}')">+ Add</button>
+          `}
+        </div>
+      </div>`;
+  }
+
+  function addItem(itemId) {
+    if (!requireAuth()) return;
+    const item = restaurant.menu.find(i => i._id === itemId);
+    const result = App.addToCart(item, restaurant._id, restaurant.name);
+    if (result.conflict) {
+      pendingItem = item;
+      document.getElementById('conflictModal').classList.add('open');
+      return;
+    }
+    refreshItem(itemId);
+    updateCartFloat();
+    showToast(`${item.name} added to cart`, 'success', 1800);
+  }
+
+  function changeQty(itemId, delta) {
+    if (delta > 0) {
+      const item = restaurant.menu.find(i => i._id === itemId);
+      App.addToCart(item, restaurant._id, restaurant.name);
+    } else {
+      App.removeFromCart(itemId);
+    }
+    refreshItem(itemId);
+    updateCartFloat();
+  }
+
+  function refreshItem(itemId) {
+    const item = restaurant.menu.find(i => i._id === itemId);
+    const el   = document.getElementById(`mi-${itemId}`);
+    if (el) el.outerHTML = menuItemHtml(item);
+  }
+
+  function updateCartFloat() {
+    const btn = document.getElementById('cartFloat');
+    const cnt = App.getCartCount();
+    if (cnt > 0) {
+      btn.classList.remove('hidden');
+      document.getElementById('cartFloatCount').textContent = cnt + ' item' + (cnt > 1 ? 's' : '');
+      document.getElementById('cartFloatTotal').textContent = '₹' + App.getCartTotal();
+    } else {
+      btn.classList.add('hidden');
+    }
+  }
+
+  function scrollSection(id, btn) {
+    document.querySelectorAll('.type-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const el = document.getElementById('sec-' + id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function closeConflictModal() { document.getElementById('conflictModal').classList.remove('open'); pendingItem = null; }
+  function clearAndAdd() {
+    App.clearCart();
+    closeConflictModal();
+    if (pendingItem) { App.addToCart(pendingItem, restaurant._id, restaurant.name); updateCartFloat(); renderMenu(); }
+  }
+
+  loadMenu();
+</script>
+</body>
+</html>

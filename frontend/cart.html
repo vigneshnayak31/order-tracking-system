@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cart — Order Tracking System</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="navMount"></div>
+
+<div class="page-wrap">
+  <div id="cartContent"></div>
+</div>
+
+<!-- Order placing overlay -->
+<div class="modal-overlay" id="placingOverlay">
+  <div class="modal" style="text-align:center">
+    <div class="spinner" style="width:40px;height:40px;margin:0 auto 1rem"></div>
+    <h3>Placing Order…</h3>
+    <p id="placingMsg">Saving to MongoDB &amp; Redis…</p>
+    <div class="redis-log mt-2" id="orderLog" style="text-align:left;min-height:80px"></div>
+  </div>
+</div>
+
+<div class="toast-container"></div>
+<script src="js/app.js"></script>
+<script>
+  if (!requireAuth()) {}
+  document.getElementById('navMount').innerHTML = renderNavbar('');
+
+  function render() {
+    const cart = App.cart;
+    const el = document.getElementById('cartContent');
+
+    if (!cart.length) {
+      el.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">🛒</div>
+          <h3>Your cart is empty</h3>
+          <p>Browse restaurants and add items to get started.</p>
+          <a href="restaurants.html" class="btn btn-primary mt-2">Browse Restaurants</a>
+        </div>`;
+      return;
+    }
+
+    const rest = cart[0];
+    const subtotal = App.getCartTotal();
+    const deliveryFee = 30; // will be fetched from restaurant
+    const total = subtotal + deliveryFee;
+
+    // Get saved addresses
+    const user = App.currentUser;
+
+    el.innerHTML = `
+      <div class="flex items-center gap-1 mb-2">
+        <a href="menu.html?id=${rest.restaurantId}" class="btn btn-ghost btn-sm">← Back to Menu</a>
+        <h2 style="margin-left:.5rem">Your Cart</h2>
+      </div>
+
+      <div class="cart-layout">
+        <!-- Cart items -->
+        <div>
+          <div class="card mb-2">
+            <div class="card-header">🏪 ${rest.restaurantName}</div>
+            ${cart.map(item => `
+              <div class="cart-item">
+                <img class="cart-item-img" src="${item.image||''}" alt="${item.name}" onerror="this.src='https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=200'">
+                <div class="cart-item-info">
+                  <div class="cart-item-name">${item.name}</div>
+                  <div class="cart-item-price">${typeBadge(item)} · ₹${item.price} × ${item.qty}</div>
+                </div>
+                <div class="qty-ctrl">
+                  <button onclick="changeQty('${item._id}',-1)">−</button>
+                  <span>${item.qty}</span>
+                  <button onclick="changeQty('${item._id}',1)">+</button>
+                </div>
+                <div style="font-weight:700;font-size:.95rem;min-width:56px;text-align:right;color:var(--blue-700)">₹${item.price * item.qty}</div>
+              </div>
+            `).join('')}
+          </div>
+
+          <!-- Delivery address -->
+          <div class="card">
+            <div class="card-header">📍 Delivery Address</div>
+            <div style="padding:1rem">
+              <div class="form-group">
+                <label class="form-label">Delivery Address</label>
+                <input type="text" class="form-input" id="deliveryAddr" placeholder="Enter delivery address" value="${user?.addresses?.[0]?.line1 || ''}">
+              </div>
+              <div class="grid-2">
+                <div class="form-group">
+                  <label class="form-label">City</label>
+                  <input type="text" class="form-input" id="deliveryCity" placeholder="City" value="Bengaluru">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Pincode</label>
+                  <input type="text" class="form-input" id="deliveryPin" placeholder="Pincode" value="560001">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Order summary -->
+        <div class="order-summary">
+          <div class="card">
+            <div class="card-header">💰 Order Summary</div>
+            <div style="padding:1rem">
+              <div class="summary-row"><span>Subtotal (${App.getCartCount()} items)</span><span>₹${subtotal}</span></div>
+              <div class="summary-row"><span>Delivery Fee</span><span>₹${deliveryFee}</span></div>
+              <div class="summary-row total"><span>Total</span><span>₹${total}</span></div>
+            </div>
+          </div>
+
+          <div class="info-box blue mt-2" style="margin-top:1rem">
+            🚀 Order is placed instantly — tracked live in Redis. No payment required.
+          </div>
+
+          <button class="btn btn-primary btn-block btn-lg" style="margin-top:1rem" onclick="placeOrder()">
+            📦 Place Order Now
+          </button>
+
+          <button class="btn btn-ghost btn-block btn-sm" style="margin-top:.5rem" onclick="App.clearCart();render()">
+            🗑️ Clear Cart
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function changeQty(id, delta) {
+    if (delta > 0) {
+      const item = App.cart.find(c => c._id === id);
+      App.addToCart(item, item.restaurantId, item.restaurantName);
+    } else {
+      App.removeFromCart(id);
+    }
+    render();
+    // update navbar cart count
+    document.getElementById('navMount').innerHTML = renderNavbar('');
+  }
+
+  async function placeOrder() {
+    const line1   = document.getElementById('deliveryAddr')?.value?.trim();
+    const city    = document.getElementById('deliveryCity')?.value?.trim() || 'Bengaluru';
+    const pincode = document.getElementById('deliveryPin')?.value?.trim()  || '560001';
+
+    if (!line1) { showToast('Please enter delivery address', 'error'); return; }
+
+    const overlay = document.getElementById('placingOverlay');
+    const log     = document.getElementById('orderLog');
+    overlay.classList.add('open');
+
+    function logLine(html) { log.innerHTML += html + '\n'; log.scrollTop = log.scrollHeight; }
+    logLine(`<span class="cmd">POST /order/place</span>`);
+    logLine(`<span class="info">• Checking rate limit (max 5/hr)…</span>`);
+    logLine(`<span class="info">• Saving order to MongoDB…</span>`);
+    logLine(`<span class="info">• HSET order:&lt;id&gt; in Redis…</span>`);
+    logLine(`<span class="info">• RPUSH delivery:queue…</span>`);
+
+    try {
+      const payload = {
+        restaurant_id:    App.cart[0].restaurantId,
+        items:            App.cart.map(i => ({ menu_item_id: i._id, name: i.name, price: i.price, qty: i.qty, type: i.type, image: i.image })),
+        delivery_address: { label:'Home', line1, city, pincode }
+      };
+
+      const data = await apiPost('/order/place', payload);
+      logLine(`<span class="ok">✓ Order placed: ${data.order._id}</span>`);
+      if (data.redis) {
+        logLine(`<span class="ok">✓ Redis key: ${data.redis.key}</span>`);
+        logLine(`<span class="ok">✓ Queue position: ${data.redis.queue_position}</span>`);
+        logLine(`<span class="ok">✓ Rate limit: ${data.redis.rate_limit?.remaining} orders remaining this hour</span>`);
+      } else if (data.fallback) {
+        logLine(`<span class="err">⚠ Redis unavailable — saved directly to MongoDB (fallback)</span>`);
+      }
+
+      App.clearCart();
+      setTimeout(() => {
+        overlay.classList.remove('open');
+        window.location.href = `tracking.html?id=${data.order._id}`;
+      }, 2200);
+    } catch (err) {
+      logLine(`<span class="err">✗ Error: ${err.message}</span>`);
+      document.getElementById('placingMsg').textContent = 'Error placing order';
+      setTimeout(() => {
+        overlay.classList.remove('open');
+        showToast(err.message, 'error');
+      }, 1500);
+    }
+  }
+
+  render();
+</script>
+</body>
+</html>

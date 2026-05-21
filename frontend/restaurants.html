@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Restaurants — Order Tracking System</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="navMount"></div>
+
+<div class="page-wrap">
+  <!-- Hero -->
+  <div class="hero-strip">
+    <h1>Find great food nearby 🍽️</h1>
+    <p>Order from the best restaurants — tracked in real-time with MongoDB & Redis</p>
+    <div class="search-bar">
+      <input type="text" id="searchInput" placeholder="Search restaurants or cuisines…" oninput="filterRestaurants()">
+      <button class="btn btn-primary btn-sm" onclick="filterRestaurants()">Search</button>
+    </div>
+  </div>
+
+  <!-- Filter chips -->
+  <div class="filter-row" id="filterRow"></div>
+
+  <!-- Loading -->
+  <div class="page-loader" id="loader"><div class="spinner"></div> Loading restaurants from MongoDB…</div>
+
+  <!-- Grid -->
+  <div id="restaurantGrid" class="restaurant-grid"></div>
+</div>
+
+<div class="toast-container"></div>
+
+<script src="js/app.js"></script>
+<script>
+  let allRestaurants = [];
+  let activeFilter = 'All';
+
+  document.getElementById('navMount').innerHTML = renderNavbar('restaurants');
+  checkRedisStatus();
+  setInterval(checkRedisStatus, 10000);
+
+  async function loadRestaurants() {
+    try {
+      allRestaurants = await apiGet('/restaurants');
+      document.getElementById('loader').style.display = 'none';
+      buildFilters();
+      renderRestaurants();
+    } catch (err) {
+      document.getElementById('loader').innerHTML = `<span style="color:var(--red)">Failed to load — is the server running? (npm start in /backend)</span>`;
+    }
+  }
+
+  function buildFilters() {
+    const cuisines = ['All', ...new Set(allRestaurants.map(r => r.cuisine))];
+    document.getElementById('filterRow').innerHTML = cuisines.map(c =>
+      `<button class="filter-chip ${c === activeFilter ? 'active' : ''}" onclick="setFilter('${c}')">${c}</button>`
+    ).join('');
+  }
+
+  function setFilter(f) {
+    activeFilter = f;
+    buildFilters();
+    renderRestaurants();
+  }
+
+  function filterRestaurants() {
+    renderRestaurants();
+  }
+
+  function renderRestaurants() {
+    const q = (document.getElementById('searchInput')?.value || '').toLowerCase();
+    let list = allRestaurants.filter(r =>
+      (activeFilter === 'All' || r.cuisine === activeFilter) &&
+      (r.name.toLowerCase().includes(q) || r.cuisine.toLowerCase().includes(q) || (r.tags||[]).some(t => t.toLowerCase().includes(q)))
+    );
+
+    const grid = document.getElementById('restaurantGrid');
+    if (!list.length) {
+      grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-icon">🔍</div><h3>No restaurants found</h3><p>Try a different search or filter</p></div>`;
+      return;
+    }
+
+    grid.innerHTML = list.map(r => `
+      <div class="rest-card" onclick="window.location.href='menu.html?id=${r._id}'">
+        <div class="rest-card-img">
+          <img src="${r.image || 'https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?w=600&q=80'}" alt="${r.name}" loading="lazy">
+          <span class="rest-badge ${r.is_open ? 'open' : 'closed'}">${r.is_open ? '● Open' : '✕ Closed'}</span>
+        </div>
+        <div class="rest-card-body">
+          <div class="rest-name">${r.name}</div>
+          <div class="rest-meta">
+            <span>${renderStars(r.avg_rating || 4)} ${(r.avg_rating||4).toFixed(1)}</span>
+            <span>· ${r.avg_delivery_time || 30} min</span>
+            <span>· ₹${r.delivery_fee} delivery</span>
+            <span>· Min ₹${r.min_order}</span>
+          </div>
+          <div class="rest-meta" style="margin-bottom:.4rem">
+            <span style="color:var(--gray-600)">${r.cuisine}</span>
+            ${r.redis_online ? '<span style="color:var(--green);font-size:.72rem">● Live</span>' : ''}
+          </div>
+          <div class="rest-tags">${(r.tags||[]).slice(0,3).map(t=>`<span class="tag">${t}</span>`).join('')}</div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  loadRestaurants();
+</script>
+</body>
+</html>

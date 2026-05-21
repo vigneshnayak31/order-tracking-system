@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Orders — Order Tracking System</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="navMount"></div>
+
+<div class="page-wrap">
+  <div class="section-title">
+    <h2>My Orders</h2>
+    <p>Your full order history from MongoDB</p>
+  </div>
+
+  <div class="page-loader" id="loader"><div class="spinner"></div> Fetching orders from MongoDB…</div>
+  <div id="ordersList"></div>
+</div>
+
+<div class="toast-container"></div>
+<script src="js/app.js"></script>
+<script>
+  if (!requireAuth()) {}
+  document.getElementById('navMount').innerHTML = renderNavbar('orders');
+  checkRedisStatus();
+
+  async function loadOrders() {
+    try {
+      const orders = await apiGet('/orders/my');
+      document.getElementById('loader').style.display = 'none';
+      renderOrders(orders);
+    } catch (err) {
+      document.getElementById('loader').innerHTML = `<span style="color:var(--red)">Error: ${err.message}</span>`;
+    }
+  }
+
+  function renderOrders(orders) {
+    const el = document.getElementById('ordersList');
+    if (!orders.length) {
+      el.innerHTML = `<div class="empty-state"><div class="empty-icon">📦</div><h3>No orders yet</h3><p>Browse restaurants and place your first order!</p><a href="restaurants.html" class="btn btn-primary mt-2">Browse</a></div>`;
+      return;
+    }
+
+    el.innerHTML = orders.map(o => {
+      const rest = o.restaurant_id;
+      const name = (rest && rest.name) ? rest.name : (o.restaurant_name || 'Unknown');
+      const items = (o.items || []).map(i => `${i.name} ×${i.qty}`).join(', ');
+      const isActive = !['delivered','cancelled'].includes(o.status);
+      return `
+        <div class="order-card">
+          <div class="oc-head">
+            <div class="oc-id">${o._id}</div>
+            <div class="oc-rest">${name}</div>
+            <div class="oc-items text-sm text-muted mt-1">${items || 'Items not loaded'}</div>
+          </div>
+          <div class="oc-foot">
+            <div>
+              ${statusPill(o.status)}
+              <div class="text-xs text-muted mt-1">${formatDate(o.placed_at)}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-weight:800;color:var(--blue-700)">₹${o.total}</div>
+              ${isActive
+                ? `<a href="tracking.html?id=${o._id}" class="btn btn-primary btn-sm" style="margin-top:.4rem">Track Live 🔴</a>`
+                : `<a href="tracking.html?id=${o._id}" class="btn btn-outline btn-sm" style="margin-top:.4rem">View Details</a>`
+              }
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  loadOrders();
+</script>
+</body>
+</html>
